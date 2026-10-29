@@ -1,0 +1,174 @@
+#!/bin/bash
+#SBATCH --partition=gpu_a100   # Forces it to use the A100 GPU partition
+#SBATCH --gres=gpu:1           # Requests 1 GPU (crucial for PyTorch)
+#SBATCH --time=24:00:00        # Make sure you ask for enough time
+#SBATCH --array=1-4          # Spawns 5 separate jobs (0 through 4)
+
+module purge
+module load 2023
+ module load CUDA/12.4.0
+
+PROJECT=$HOME/IPT-Equivariant-VAE/dino/InvariantRepresentation
+cd "$PROJECT"
+source activate ect_qm9
+
+TARGET_VAR=${TARGET:-alpha}
+
+# Define the models and conditions mapping
+MODELS=("baseline" "ect"    "ect"        "ect"        "ect")
+CONDS=( "concat"   "concat" "film-final" "film-layer" "adaln-layer")
+
+# Get the specific model for this task ID
+CURRENT_MODEL=${MODELS[$SLURM_ARRAY_TASK_ID]}
+CURRENT_COND=${CONDS[$SLURM_ARRAY_TASK_ID]}
+
+echo "Running task $SLURM_ARRAY_TASK_ID: Target=$TARGET_VAR, Model=$CURRENT_MODEL, Cond=$CURRENT_COND"
+
+python train_egnn.py --target $TARGET_VAR --model $CURRENT_MODEL --cond-type $CURRENT_COND
+# #!/bin/bash
+# # =============================================================================
+# #  ECT Plug-in — QM9 Backbone Comparison
+# #  Runs baseline vs. +ECT for one target property across all 6 backbones.
+# #
+# #  Submit one model + one target:
+# #    sbatch --export=TARGET=alpha,MODEL=egnn      run.job
+# #    sbatch --export=TARGET=alpha,MODEL=painn     run.job
+# #    sbatch --export=TARGET=alpha,MODEL=spherenet run.job
+# #    sbatch --export=TARGET=alpha,MODEL=ponita    run.job
+# #
+# #  Submit all models for one target in parallel:
+# #    for m in egnn painn spherenet ponita; do
+# #        sbatch --export=TARGET=alpha,MODEL=$m run.job
+# #    done
+# #
+# #  Submit all models x all targets (16 jobs):
+# #    for t in alpha mu homo gap; do
+# #        for m in egnn painn spherenet ponita; do
+# #            sbatch --export=TARGET=$t,MODEL=$m run.job
+# #        done
+# #    done
+# # =============================================================================
+
+# #SBATCH --job-name=ect_qm9
+# #SBATCH --partition=gpu_h100
+# #SBATCH --gpus=1
+# #SBATCH --ntasks=1
+# #SBATCH --cpus-per-task=4
+# #SBATCH --mem=32G
+# #SBATCH --time=96:00:00
+# #SBATCH --output=logs/run_%x_%j.txt
+
+# # ── Environment ───────────────────────────────────────────────────────────────
+# module purge
+# module load 2023
+# module load CUDA/12.4.0
+
+# PROJECT=$HOME/IPT-Equivariant-VAE/dino/InvariantRepresentation
+# cd "$PROJECT"
+# source activate ect_qm9
+
+# TARGET=${TARGET:-alpha}          # default target if not passed via --export
+# MODEL=${MODEL:-all}             # egnn | painn | spherenet | ponita | all
+
+# mkdir -p logs results
+
+# echo "Environment: $(python --version), torch $(python -c 'import torch; print(torch.__version__)')"
+# echo ""
+
+# echo "================================================================"
+# echo "  ECT Plug-in  |  target: $TARGET  |  model: $MODEL  |  job: $SLURM_JOB_ID"
+# echo "  Start: $(date)"
+# echo "================================================================"
+# echo ""
+
+# # ── Helper: run one training script, tee to a log ────────────────────────────
+# run_model() {
+#     local name=$1; shift
+#     local log="logs/${TARGET}_${name}.txt"
+#     echo "──────────────────────────────────────────────────────────────"
+#     echo "  [$name]  started $(date +%H:%M:%S)"
+#     echo "──────────────────────────────────────────────────────────────"
+#     python -u "$@" --target "$TARGET" 2>&1 | tee "$log"
+#     echo "  [$name]  finished $(date +%H:%M:%S)"
+#     echo ""
+# }
+
+# # ── 1. EGNN  (Satorras 2021) ─────────────────────────────────────────────────
+# [[ "$MODEL" == "all" || "$MODEL" == "egnn" ]] && \
+# run_model egnn train_egnn.py \
+#     --hidden-features 128 \
+#     --num-layers      7   \
+#     --cutoff          10.0 \
+#     --batch-size      96  \
+#     --lr              5e-4 \
+#     --epochs          1000
+
+# # ── 2. TensorNet  (Simeon 2023) ──────────────────────────────────────────────
+# echo "  [torchmdnet]  SKIPPED (no PyPI release compatible with torch 2.4.1)"
+
+# # ── 3. PaiNN  (Schütt 2021) ──────────────────────────────────────────────────
+# [[ "$MODEL" == "all" || "$MODEL" == "painn" ]] && \
+# run_model painn train_painn.py \
+#     --n-atom-basis    128 \
+#     --n-interactions  3   \
+#     --cutoff          5.0 \
+#     --batch-size      64  \
+#     --lr              5e-4 \
+#     --epochs          300
+
+# # ── 4. SphereNet  (Liu 2022) ─────────────────────────────────────────────────
+# [[ "$MODEL" == "all" || "$MODEL" == "spherenet" ]] && \
+# run_model spherenet train_spherenet.py \
+#     --hidden-channels  128 \
+#     --out-emb-channels 256 \
+#     --num-layers       4   \
+#     --cutoff           5.0 \
+#     --batch-size       32  \
+#     --lr               5e-4 \
+#     --epochs           300
+
+# # ── 5. EquiformerV2  (Liao 2024) ─────────────────────────────────────────────
+# echo "  [equiformerv2]  SKIPPED (fairchem-core incompatible with torch 2.4 env)"
+
+# # ── 6. PONITA  (Bekkers 2023) ────────────────────────────────────────────────
+# [[ "$MODEL" == "all" || "$MODEL" == "ponita" ]] && \
+# run_model ponita train_ponita.py \
+#     --hidden-dim    128   \
+#     --num-layers    5     \
+#     --num-ori       20    \
+#     --basis-dim     256   \
+#     --ponita-radius 1000.0 \
+#     --batch-size    64    \
+#     --lr            5e-4  \
+#     --epochs        300
+
+# # ── Results summary ───────────────────────────────────────────────────────────
+# SUMMARY="results/summary_${TARGET}.txt"
+
+# {
+# echo "================================================================"
+# echo "  RESULTS SUMMARY  |  target: $TARGET  |  $(date)"
+# echo "================================================================"
+# echo ""
+# echo "  Model                        Baseline MAE    +ECT MAE"
+# echo "  ─────────────────────────────────────────────────────"
+
+# for name in egnn painn spherenet ponita; do
+#     log="logs/${TARGET}_${name}.log"
+#     if [[ -f "$log" ]]; then
+#         # Each script prints a two-row summary table: baseline row then ECT row
+#         grep -E "^\s+(EGNN|TensorNet|PaiNN|SphereNet|EquiformerV2|PONITA)" "$log" \
+#           | awk '{printf "  %-28s %s\n", $1, $NF}'
+#     else
+#         echo "  [$name] — log not found"
+#     fi
+# done
+
+# echo ""
+# echo "  Full logs: logs/${TARGET}_<model>.log"
+# echo "================================================================"
+# } | tee "$SUMMARY"
+
+# echo ""
+# echo "Summary saved to: $SUMMARY"
+# echo "End: $(date)"

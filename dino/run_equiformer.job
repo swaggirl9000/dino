@@ -1,0 +1,53 @@
+#!/bin/bash
+# =============================================================================
+#  ECT Plug-in — EquiformerV2 on QM9
+#  Separate job because fairchem-core requires torch~=2.8, incompatible with
+#  the ect_qm9 env used by all other models.
+#
+#  Submit:
+#    sbatch --export=TARGET=alpha run_equiformer.job
+#    for t in alpha mu homo gap; do sbatch --export=TARGET=$t run_equiformer.job; done
+# =============================================================================
+
+#SBATCH --job-name=ect_equiformer
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=32G
+#SBATCH --time=24:00:00
+#SBATCH --output=logs/run_%x_%j.txt
+
+module purge
+module load 2023
+module load CUDA/12.4.0
+
+PROJECT=$HOME/IPT-Equivariant-VAE/dino/InvariantRepresentation
+cd "$PROJECT"
+source activate ect_equiformer
+
+TARGET=${TARGET:-alpha}
+
+mkdir -p logs results
+
+echo "Environment: $(python --version), torch $(python -c 'import torch; print(torch.__version__)')"
+echo ""
+echo "================================================================"
+echo "  ECT Plug-in  |  EquiformerV2  |  target: $TARGET  |  job: $SLURM_JOB_ID"
+echo "  Start: $(date)"
+echo "================================================================"
+echo ""
+
+log="logs/${TARGET}_equiformerv2.log"
+echo "──────────────────────────────────────────────────────────────"
+echo "  [equiformerv2]  started $(date +%H:%M:%S)"
+echo "──────────────────────────────────────────────────────────────"
+python -u train_equiformerv2.py \
+    --target "$TARGET" \
+    --batch-size 32 \
+    --lr 5e-4 \
+    --epochs 300 2>&1 | tee "$log"
+echo "  [equiformerv2]  finished $(date +%H:%M:%S)"
+
+echo ""
+echo "End: $(date)"

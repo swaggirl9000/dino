@@ -1,0 +1,262 @@
+\documentclass{article}
+
+% Uses the official style when neurips_2026.sty is in this folder; otherwise
+% falls back to a plain layout so the draft still compiles.
+\IfFileExists{neurips_2026.sty}{%
+  \usepackage{neurips_2026}%
+}{%
+  \usepackage[margin=1.5in]{geometry}%
+  \usepackage[round]{natbib}%
+  \usepackage{lmodern}%
+}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{xcolor}
+
+\newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\N}{\mathbb{N}}
+\newcommand{\Z}{\mathbb{Z}}
+\newcommand{\ECT}{\operatorname{ECT}}
+\newcommand{\DECT}{\operatorname{DECT}}
+\newcommand{\onehot}{\operatorname{onehot}}
+\newcommand{\SiLU}{\operatorname{SiLU}}
+\newcommand{\LN}{\operatorname{LN}}
+\newcommand{\Conv}{\operatorname{Conv}}
+\newcommand{\MLP}{\operatorname{MLP}}
+\newcommand{\enull}{e_{\varnothing}}
+
+% TODO: working title only -- replace with your own.
+\title{Euler Characteristic Transforms as Global Shape Descriptors\\for Equivariant Machine-Learned Force Fields}
+
+\author{Anonymous Author(s)\\Affiliation\\Address\\\texttt{email}}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+\todo{Write once results are in: problem, method (ECT token in a canonical frame, injected into PONITA), regularizers, main numbers on rMD17.}
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+Machine-learned force fields predict the energy of a molecular configuration and obtain forces as its negative gradient. Equivariant message-passing networks have become the standard architecture for this task \citep{batzner2022nequip,batatia2022mace,bekkers2024ponita}: they build every prediction from pairwise or many-body geometric invariants, and their symmetry constraints make them data efficient. What these networks represent is a sum of interactions. Each atom aggregates information about its neighbors, and the molecule's energy is assembled from these local views. The shape of the molecule as a whole is never represented explicitly; if the network uses it, it has to reconstruct it from the interactions.
+
+Topological data analysis offers descriptors that summarize a shape directly. The Euler characteristic transform (ECT) \citep{turner2014pht} records, for every direction, how the Euler characteristic of a shape changes as a plane sweeps through it. The exact ECT determines a shape uniquely \citep{turner2014pht,ghrist2018euler,curry2022directions}, it is cheap to compute, and its differentiable relaxation DECT \citep{roell2024dect} can be trained end to end. Local variants describe the neighborhood of each node \citep{vonrohrscheidt2025disslect,garciaamboage2026leap}. So far, these descriptors have been used mainly for classification and as positional encodings for graphs. Using them inside a force field raises problems that classification does not have. The descriptor must be invariant to rotations, it must be differentiable in the atomic positions because forces are obtained through it, and it should be smooth, because every discontinuity in the descriptor becomes a discontinuity in the energy.
+
+In this work, we ask whether an explicit global shape descriptor helps an equivariant force field, and how it should be injected. We compute the ECT of each molecule as a point cloud in a canonical frame, encode it into a single token, and combine it with PONITA \citep{bekkers2024ponita}, an equivariant network that operates in position--orientation space. We compare several ways of injecting the token, from concatenation at the input to adaptive layer normalization in every block, and we analyze where the construction breaks the assumptions a force field relies on. Because the training data of a single-molecule benchmark contain only conformations of one molecule, a global token might let the model memorize individual training geometries. We therefore also test two regularizers that make the token less reliable during training.
+
+\todo{Revise this list once the results are in; add the main quantitative finding.} Our contributions are:
+\begin{itemize}
+  \item A rotation-invariant, differentiable ECT descriptor for molecules, computed on atom positions alone in a canonical frame, together with a local variant for each atom's neighborhood. We characterize where it fails to be invariant or continuous: at repeated eigenvalues, at sign flips of the frame, and at the local cutoff.
+  \item A comparison of ways to inject ECT tokens into PONITA, from concatenation at the input to adaptive layer normalization in every block, all of which preserve the network's equivariance and the equivariance of the forces.
+  \item Two regularizers against memorization through the token, condition dropout and token noise, and an evaluation with a null token that measures how much a trained model relies on the ECT.
+  \item An empirical study on aspirin from rMD17 \citep{christensen2020rmd17}.
+\end{itemize}
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Machine-learned force fields.}
+Neural networks for molecular energies and forces have progressed from invariant models built on distances and angles \citep{schutt2017schnet,gasteiger2020dimenet,liu2022spherenet} to equivariant networks that carry vector or higher-order features \citep{satorras2021egnn,schutt2021painn,tholke2022torchmdnet,batzner2022nequip,batatia2022mace,musaelian2023allegro,liao2024equiformerv2}. PONITA \citep{bekkers2024ponita} achieves equivariance differently, by lifting atoms to position--orientation space and sharing weights over orientation pairs, and reaches strong accuracy on rMD17 \citep{chmiela2017md17,christensen2020rmd17}. Most of these models operate within a distance cutoff. Approaches that add nonlocal information include Ewald message passing \citep{kosmala2023ewald}, which aggregates in Fourier space. Our global ECT token is a different kind of nonlocal information: rather than a longer range of interactions, it is a summary of the shape of the whole molecule.
+
+\paragraph{Topological descriptors.}
+Persistent homology has been used to build features for molecules and proteins \citep{cang2017topologynet,townsend2020ph} and integrated into graph neural networks as a learnable layer \citep{horn2022togl}; see \citet{hensel2021survey} for a survey. The ECT \citep{turner2014pht} is a simpler invariant with strong injectivity guarantees \citep{ghrist2018euler,curry2022directions}. DECT \citep{roell2024dect} makes it differentiable and learnable for shape classification. The local ECT \citep{vonrohrscheidt2025disslect} describes the neighborhood of each node in a graph, and LEAP \citep{garciaamboage2026leap} turns it into a learnable positional encoding. We build on DECT and LEAP but use them in a regression setting where the descriptor is differentiated with respect to the atomic positions, which makes its invariance and smoothness essential rather than desirable.
+
+\paragraph{Canonicalization and frames.}
+Instead of building invariance into the architecture, one can map each input to a canonical pose \citep{kaba2023canonicalization} or average over a frame of poses \citep{puny2022frame}. PCA-based frames are a common choice for point clouds and have been used for materials modeling \citep{duval2023faenet}. \citet{dym2024frames} show that no efficiently computable canonicalization is continuous everywhere, and that frames must be weighted to avoid discontinuities. Our canonical frame is of the simple, unweighted kind and inherits these discontinuities, which we discuss in Section~\ref{sec:ect-molecules}.
+
+\paragraph{Conditioning mechanisms.}
+To combine the ECT token with PONITA, we draw on conditioning methods from vision and generative modeling. FiLM \citep{perez2018film} modulates features with a learned scale and shift. The adaLN-Zero design of diffusion transformers \citep{peebles2023dit}, as adapted for protein generation in Proteina \citep{geffner2025proteina}, conditions every block and starts from the unconditioned model. Our regularizers follow condition dropout in classifier-free guidance \citep{ho2022cfg} and the noise conditioning augmentation of cascaded diffusion models \citep{ho2022cascaded}.
+
+\section{Methods}
+
+\subsection{Setup}
+A molecule is given by atomic numbers $z \in \N^N$ and positions $x \in \R^{N\times 3}$, with one row $x_i$ per atom. A model predicts a scalar energy $E(z,x)$, and forces are $F = -\nabla_x E$. If $E$ is invariant under translations and rotations, $E(z, xR^\top + \mathbf{1}c^\top) = E(z,x)$ for all $R\in SO(3)$ and $c\in\R^3$, then its gradient is automatically equivariant, $F(xR^\top + \mathbf{1}c^\top) = F(x)R^\top$. Any invariant feature we add therefore preserves force equivariance, provided it is differentiable in $x$, and it contributes its own gradient to every force. Our ECT features meet these conditions only for generic geometries: the canonical frame is not unique for symmetric molecules, its sign choice can flip, and the local cutoff introduces discontinuities (Section~\ref{sec:ect-molecules}).
+
+\subsection{PONITA}
+\label{sec:ponita}
+PONITA \citep{bekkers2024ponita} lifts each atom to position--orientation space $\R^3\times S^2$, representing every atom by features on a grid of 20 orientations $o\in S^2$. A message from $(x_j,o')$ to $(x_i,o)$ is conditioned on the invariant triple
+\begin{equation}
+  a_{ij}^{oo'} = \Big( o^\top (x_j - x_i),\; \big\| (x_j - x_i) - o\,o^\top (x_j - x_i) \big\|,\; o^\top o' \Big),
+  \label{eq:ponita-invariants}
+\end{equation}
+and sharing weights over all orientation pairs makes the network $SE(3)$ equivariant for a continuous sphere of orientations. On the finite grid, equivariance holds only approximately, which is why we also train with random rotations (Section~\ref{sec:exp-setup}). The input feature of atom $i$ is a one-hot encoding of its element over H, C, N, O, F, S, Cl, P and Br. Each layer is a ConvNeXt-style block: a fiber-bundle convolution, LayerNorm, a two-layer MLP with GELU and $4\times$ widening, a learned per-channel layer scale, and a residual connection. We use hidden size 128, 5 layers, a basis of size 256 with polynomial degree 3, and a fully connected graph with self-loops. After every layer the features of each atom are read out, and the per-layer readouts are summed into an atom embedding $h_i\in\R^{128}$. Following PONITA's MD17 setup, a linear map turns each $h_i$ into an atomic energy, and the energy of the molecule is their sum. We write $g := \sum_i h_i$ for the pooled molecule embedding.
+
+\subsection{Euler characteristic transforms}
+
+\paragraph{The Euler characteristic.}
+The Euler characteristic of a finite simplicial complex $K$ is the alternating count of its simplices,
+\begin{equation}
+  \chi(K) = \sum_{k=0}^{\dim K} (-1)^k \big| K^{(k)} \big|,
+  \label{eq:euler}
+\end{equation}
+where $K^{(k)}$ is the set of $k$-simplices of $K$. It is a topological invariant: it equals the alternating sum of the Betti numbers of $K$.
+
+\paragraph{Filtrations.}
+A \emph{filtration} of $K$ is a nested sequence of subcomplexes
+\begin{equation}
+  \emptyset = K_0 \subseteq K_1 \subseteq \dots \subseteq K_{m-1} \subseteq K_m = K.
+  \label{eq:filtration}
+\end{equation}
+Let $K$ be a geometric simplicial complex in $\R^d$ whose vertices $v$ have positions $x_v$. We obtain a filtration for every direction $\xi\in S^{d-1}$ from the parametric filter function
+\begin{equation}
+  f\colon S^{d-1}\times\R^d \to \R, \qquad (\xi, x) \mapsto \langle x, \xi\rangle,
+  \label{eq:filter}
+\end{equation}
+with $f_\xi := f(\xi,\cdot)$. The function $f_\xi$ gives each vertex its height along $\xi$ and is extended to simplices by $\tilde f_\xi(\sigma) := \max_{v\in\sigma} f_\xi(x_v)$, so a simplex enters the filtration together with its highest vertex. Since a face is never higher than the simplex containing it, the sublevel sets $K_{\xi,h} := \{\sigma\in K : \tilde f_\xi(\sigma) \le h\}$ are subcomplexes, and for increasing $h\in\R$ they form a filtration of the form~\eqref{eq:filtration}: a plane orthogonal to $\xi$ sweeps through the shape and collects everything below it. For a fixed direction, the \emph{Euler characteristic curve} (ECC) is $h\mapsto \chi(K_{\xi,h})$. It is a step function that changes only at simplex heights.
+
+\paragraph{The Euler characteristic transform.}
+The ECT \citep{turner2014pht} is the collection of ECCs over all directions:
+\begin{equation}
+  \ECT_K\colon S^{d-1}\times\R \to \Z, \qquad (\xi,h) \mapsto \chi(K_{\xi,h}).
+  \label{eq:ect}
+\end{equation}
+The ECT is injective on simplicial complexes in $\R^d$: two complexes with the same ECT are equal. \citet{turner2014pht} prove this for $d\le 3$, and \citet{curry2022directions} and \citet{ghrist2018euler} for general $d$. Moreover, for shapes with a priori bounds on their complexity, finitely many directions suffice \citep{curry2022directions}. These guarantees concern the exact transform. The smoothed, finitely sampled version we use below carries no such guarantee. Because $\chi$ is additive over simplices, Eq.~\eqref{eq:ect} can be written as a signed sum of indicator functions, one per simplex,
+\begin{equation}
+  \ECT_K(\xi,h) = \sum_{k=0}^{\dim K} (-1)^k \sum_{\sigma\in K^{(k)}} \mathbf{1}\big[\tilde f_\xi(\sigma) \le h\big].
+  \label{eq:ect-sum}
+\end{equation}
+Each $k$-simplex contributes $(-1)^k$ once the sweeping plane has passed its highest vertex.
+
+Two properties matter for molecules. Translating the shape by $c$ shifts every curve, $\ECT_{K+c}(\xi,h) = \ECT_K(\xi, h - \langle c,\xi\rangle)$, so we center each point set first. Rotating the shape by $R$ rotates the sphere of directions, $\ECT_{RK}(\xi,h) = \ECT_K(R^\top\xi, h)$, so an ECT sampled on a fixed set of directions changes when the molecule rotates. A force field needs a rotation-invariant descriptor, which is why we compute the ECT in a canonical frame (Section~\ref{sec:ect-molecules}).
+
+\paragraph{DECT: the differentiable ECT.}
+Each indicator in Eq.~\eqref{eq:ect-sum} has zero derivative almost everywhere, so the ECT gives no useful gradient. DECT \citep{roell2024dect} replaces it with the logistic function $S(t) = 1/(1+e^{-t})$, with $\lambda>0$ controlling how tight the approximation is:
+\begin{equation}
+  \DECT_K(\xi,h) = \sum_{k=0}^{\dim K} (-1)^k \sum_{\sigma\in K^{(k)}} S\big(\lambda\cdot(h - \tilde f_\xi(\sigma))\big).
+  \label{eq:dect}
+\end{equation}
+Each summand is differentiable in $h$ and, wherever the maximum in $\tilde f_\xi(\sigma)$ is attained by a single vertex, in $\xi$ and the vertex coordinates. For point clouds, as used below, it is differentiable everywhere. Eq.~\eqref{eq:dect} recovers Eq.~\eqref{eq:ect-sum} as $\lambda\to\infty$. In practice, Eq.~\eqref{eq:dect} is evaluated for a finite set of directions on a regular grid of $h$ values, which turns a shape into an image with one row per direction. DECT can learn the directions. We keep them fixed, because our encoder convolves over the mesh that connects them (Section~\ref{sec:ect-molecules}).
+
+\subsection{ECT descriptors for molecules}
+\label{sec:ect-molecules}
+
+\paragraph{Canonical frame.}
+Following canonicalization approaches to invariance \citep{puny2022frame,kaba2023canonicalization}, we compute all ECTs in a frame determined by the molecule itself. We center the positions, form the covariance $C = \frac{1}{N}\sum_i x_i x_i^\top$, and take its eigenvectors in order of descending eigenvalue $\mu_1\ge\mu_2\ge\mu_3$ as the rows of $V$. The sign of each axis $a$ is fixed by the third moment, $s_a = \operatorname{sign}\big(\sum_i (Vx_i)_a^3\big)$ with $\operatorname{sign}(0) := +1$, and the canonical positions are $\tilde x_i = DVx_i$ with $D = \operatorname{diag}(s_1,s_2,s_3)$.
+
+The frame is unique, and $\tilde x$ is therefore identical for every rotation of the input, only when the eigenvalues are distinct and the third moments are non-zero. Both conditions can fail. Symmetric molecules have repeated eigenvalues: benzene has two equal in-plane eigenvalues, and methane has three. For such molecules the frame, and hence the descriptor, depends on numerical noise. Because forces are obtained by backpropagating through the frame, the gradient also inherits the terms $1/(\mu_a-\mu_b)$ of the eigendecomposition backward pass, which grow without bound as two eigenvalues approach each other. Separately, when a third moment passes through zero, the corresponding sign $s_a$ flips, the canonical positions are reflected across a coordinate plane, and the descriptor, and with it the energy, jumps. Both are instances of a general obstruction: no efficiently computable canonicalization is continuous everywhere \citep{dym2024frames}. \todo{Report, over the aspirin dataset, the smallest eigenvalue gap and the smallest $|\sum_i (Vx_i)_a^3|$, to show whether either case occurs in practice.}
+
+We compute the frame with a symmetric eigendecomposition (\texttt{torch.linalg.eigh}) of the symmetrized $C$ plus $10^{-6} I$. The shift keeps the eigenvalues of planar and linear molecules away from zero and leaves the eigenvectors unchanged, but it does not remove the divergence: it moves all eigenvalues equally and leaves their gaps unchanged. Finally, since the three signs are fixed independently, $\det(DV) = -1$ is possible, so the descriptor is invariant under $O(3)$ rather than $SO(3)$. It cannot distinguish enantiomers, which is harmless for energies because they are reflection invariant.
+
+\paragraph{Global ECT.}
+We apply Eq.~\eqref{eq:dect} with $d=3$ to the molecule as a point cloud: a complex made only of 0-simplices (the atoms), each with sign $+1$ and height $\langle\tilde x_i,\xi\rangle$ in the canonical frame,
+\begin{equation}
+  \DECT(\xi,h) = \sum_{i=1}^N S\big(\lambda\cdot(h - \langle\tilde x_i,\xi\rangle)\big), \qquad \xi\in\Xi,\; h\in[-8,8]\,\text{\AA}.
+  \label{eq:global-ect}
+\end{equation}
+The directions $\Xi$ are the $|\Xi| = 92$ vertices of a geodesic icosphere with subdivision frequency 3. With 64 values of $h$ and $\lambda = 64\,\text{\AA}^{-1}$, this gives a $92\times 64$ grid per molecule.
+% TODO: the h-grid spacing is 16/63 ~ 0.25 A, but the sigmoid's transition is only
+% ~4/lambda ~ 0.06 A wide, so most atom positions give near-zero gradient and atoms
+% near a grid value give a spike. Either use lambda ~ 4 A^-1 or justify 64 with an ablation.
+Heights outside the threshold range saturate the sigmoid, so the range must cover the centered molecule. With no edges, the Euler characteristic of a sublevel set is the number of atoms in it, so the ECC for direction $\xi$ is the unnormalized cumulative distribution of atom heights along $\xi$. Every atom counts equally, so the global ECT describes the shape of the molecule but not its composition: a hydrogen and a carbon at the same position contribute the same term. We use this point-cloud form deliberately. It depends on positions alone and needs no bond perception step, whereas a bond list inferred from distances would change whenever a bond length crossed the detection threshold and make the energy discontinuous.
+
+\paragraph{LEAP: local ECT.}
+Following LEAP \citep{garciaamboage2026leap}, every atom $i$ also gets the ECT of its own neighborhood. With $\mathcal N(i) = \{\, j\ne i : \|x_j - x_i\| \le r_c \,\}$ and $r_c = 5\,\text{\AA}$,
+\begin{equation}
+  \ell\DECT_i(\xi,h) = \sum_{j\in\mathcal N(i)\cup\{i\}} S\big(\lambda\cdot(h - \langle\tilde x_j - \tilde x_i, \xi\rangle)\big),
+  \label{eq:local-ect}
+\end{equation}
+which gives one $92\times 64$ grid per atom. We flatten it and map it with a two-layer MLP with SiLU to a per-atom token $\ell e_i\in\R^{64}$. Since $|\langle\tilde x_j - \tilde x_i,\xi\rangle| \le r_c$, every neighbor falls inside the threshold range $[-8,8]\,$\AA. Unlike LEAP, the neighborhood is a geometric ball instead of an $m$-hop subgraph, and relative positions are expressed in the global canonical frame, which makes Eq.~\eqref{eq:local-ect} rotation invariant without a per-atom frame. This choice has two consequences. First, the descriptor is not strictly local: $\tilde x_j - \tilde x_i = DV(x_j - x_i)$ depends on $V$, which depends on every atom, so $\ell\DECT_i$ and the force on atom $i$ depend on atoms outside $\mathcal N(i)$. Second, the cutoff is hard: when an atom crosses $r_c$, a full sigmoid term enters or leaves the sum, so the energy is discontinuous at those configurations. This is the same discontinuity we avoid in the global ECT by not inferring bonds. A smooth cutoff function weighting each term would remove it, and we leave this to future work.
+
+\paragraph{ECTBranch encoder.}
+ECTBranch maps the global ECT of Eq.~\eqref{eq:global-ect} to a token $e\in\R^{64}$ in three stages, treating it as a signal on the icosphere with one curve per vertex. First, each curve $r_\xi = \DECT(\xi,\cdot)\in\R^{64}$ is processed independently, with weights shared across directions, by three one-dimensional convolutions over $h$ (kernel size 5, stride 2, 128 channels, leaky ReLU after the first two), followed by global max pooling over the remaining threshold positions. This gives a feature $c_\xi\in\R^{128}$ per direction. Second, two simplified graph convolutions \citep{wu2019sgc} mix the features of neighboring directions over the graph $G_\Xi$ formed by the edges of the icosphere mesh,
+\begin{equation}
+  C' = \hat A^{P}\, C\,\Theta + \mathbf{1}b^\top, \qquad \hat A = \tilde D^{-1/2}(A+I)\tilde D^{-1/2},
+  \label{eq:sgc}
+\end{equation}
+where $C\in\R^{|\Xi|\times 128}$ stacks the direction features, $A$ is the adjacency matrix of $G_\Xi$, $\tilde D$ the degree matrix of $A+I$, and $P = 39$ the number of propagation steps. Each graph convolution is followed by a leaky ReLU.
+% TODO: justify P = 39. G_Xi has only 92 vertices and a diameter of about 9 hops, so 39
+% steps (twice) drive all direction features towards the same vector before the mean.
+% An ablation over P (e.g. 1, 3, 9, 39) would settle whether the graph stage matters.
+Third, the features are averaged over all directions and mapped linearly to $e$. The per-direction convolutions are shared, the graph convolutions commute with every automorphism of $G_\Xi$, and the mean is permutation invariant. A rotation that maps the icosphere onto itself therefore leaves $e$ unchanged even without the canonical frame. For all other rotations, the mean over directions only approximates a rotation-invariant integral over $S^2$, which is why we still compute the input in the canonical frame.
+
+\subsection{Fusing the ECT with PONITA}
+\label{sec:fusion}
+The global token $e$ is computed in the canonical frame, so it is invariant, and we broadcast it to every atom as $e_i := e$. We compare four ways of injecting ECT information into PONITA: input concatenation of the global token, input concatenation of the local tokens $\ell e_i$, FiLM on the molecule embedding, and adaptive layer normalization. Two hybrids combine them. Every variant uses its tokens only through scalar operations that are shared across the orientation grid, so it inherits PONITA's equivariance, and its forces inherit the equivariance of Section~3.1.
+
+\paragraph{Input concatenation.}
+The simplest option appends the token to each atom's input features, $\psi_i^{(0)} = [\,\onehot(z_i) \,\|\, e\,]$, and lifts the result to the orientation grid as usual. The ECT then enters every layer through the convolutions, but only once, at the input, and the backbone must learn how to use it. We inject the local ECT in the same way, $\psi_i^{(0)} = [\,\onehot(z_i) \,\|\, \ell e_i\,]$, which gives each atom a descriptor of its own neighborhood.
+
+\paragraph{FiLM on the molecule embedding.}
+Feature-wise linear modulation \citep{perez2018film} conditions a network by scaling and shifting its features with functions of the conditioning input. Unlike the original formulation, which modulates every layer, we apply a single modulation after the backbone, just before the energy head:
+\begin{equation}
+  [\gamma,\beta] = W\SiLU(e) + b, \qquad h_i' = \big(1 + \tfrac12\tanh\gamma\big)\odot h_i + \beta.
+  \label{eq:film}
+\end{equation}
+Since the energy head is linear and summed over atoms, this is equivalent to modulating the pooled embedding $g$, with the shift $\beta$ scaled by $N$. Bounding the scale to $(\frac12,\frac32)$ prevents the ECT from suppressing or amplifying the backbone's representation arbitrarily, and initializing $W$ and $b$ to zero makes the model start out identical to plain PONITA. In this variant the backbone's features do not depend on the ECT at all. The ECT can only rescale and shift its output.
+
+\paragraph{Adaptive layer normalization.}
+Our fourth variant conditions every block, following the adaLN-Zero design of diffusion transformers \citep{peebles2023dit} as adapted in Proteina \citep{geffner2025proteina}. Writing $m(\gamma) := 1 + \frac12\tanh\gamma$, each ConvNeXt block $\ell$ of PONITA becomes
+\begin{align}
+  [\gamma_{\mathrm{in}},\beta_{\mathrm{in}},\gamma_{\mathrm{ln}},\beta_{\mathrm{ln}},s]_i &= W_\ell\SiLU(e_i) + b_\ell, \label{eq:adaln-params}\\
+  \bar\psi_j &= m(\gamma_{\mathrm{in},j})\odot\psi_j + \beta_{\mathrm{in},j} \quad\text{for every atom } j, \label{eq:adaln-in}\\
+  u_i &= m(\gamma_{\mathrm{ln},i})\odot \LN\big(\Conv(\bar\psi)_i\big) + \beta_{\mathrm{ln},i}, \label{eq:adaln-ln}\\
+  \psi_i' &= \psi_i + \kappa\odot 2S(s_i)\odot\MLP(u_i), \label{eq:adaln-out}
+\end{align}
+where $\kappa$ is PONITA's learned layer scale and $\Conv(\bar\psi)_i$ aggregates the modulated features of all atoms. The modulation parameters are per channel and are broadcast over the orientation grid. They are written per atom because the same block also accepts per-atom tokens. With the global token, $e_i = e$ and every atom receives the same modulation. The first affine map modulates what the convolution sees, the second is applied on top of LayerNorm's own affine parameters, and the gate $2S(s)\in(0,2)$ scales the residual update. Initializing every $W_\ell$ and $b_\ell$ to zero gives $m=1$, $\beta=0$ and $2S(0)=1$, so each block starts out exactly as in PONITA. Unlike FiLM on the embedding, this lets the ECT reshape the representation at every depth.
+
+\paragraph{Hybrid variants.}
+The variants above inject the ECT either inside the backbone or after it. Our two hybrids do both: they keep one of the in-backbone injections and also pass the global token directly to the energy head, which then reads $[\,h_i \,\|\, e\,]$ for every atom instead of $h_i$. In \emph{Hybrid-AdaLN}, every block is conditioned on $e$ as in Eq.~\eqref{eq:adaln-params}, but without the residual gate $s$, so the update is $\psi_i' = \psi_i + \kappa\odot\MLP(u_i)$. \todo{Explain why Hybrid-AdaLN drops the gate.} In \emph{Hybrid-LEAP}, the backbone instead receives the local ECT at its input, $\psi_i^{(0)} = [\,\onehot(z_i)\,\|\,\ell e_i\,]$, and is not otherwise conditioned. Hybrid-AdaLN therefore uses the global ECT twice, once to shape the representation and once at the readout. Hybrid-LEAP combines the local descriptor of each atom's neighborhood with the global descriptor of the whole molecule.
+
+\subsection{Regularizing the ECT token}
+\label{sec:regularizers}
+All geometries in rMD17 are conformations of one molecule, so across the training set the global token $e$ varies only through small conformational changes. The exact ECT determines a shape (Section~3.3), and although our smoothed version carries no such guarantee, these small differences may still be enough to tell individual training geometries apart. A model could then fit the training energies by recognizing the token, rather than by learning a function of the geometry that transfers to new conformations. We test this hypothesis with two regularizers that make the token less reliable during training. Both act on the token before it is used and only during training, and both draw their random variables independently for every molecule $b$ in a batch of $B$ molecules.
+
+\paragraph{Condition dropout.}
+As in classifier-free guidance \citep{ho2022cfg}, we replace the whole token with probability $p$ by a learned null token $\enull\in\R^{64}$, initialized to zero:
+\begin{equation}
+  \tilde e_b = m_b\, e_b + (1-m_b)\,\enull, \qquad m_b\sim\operatorname{Bernoulli}(1-p).
+  \label{eq:cond-drop}
+\end{equation}
+For a dropped molecule the backbone has to predict the energy and forces without the ECT. Since $\enull$ does not depend on $x$, the forces of that molecule come from the backbone alone, and $\enull$ is trained only by the dropped molecules. We use $p = 0.15$.
+
+\paragraph{Token noise.}
+Following the conditioning augmentation of cascaded diffusion models \citep{ho2022cascaded}, we add Gaussian noise at a level drawn per molecule,
+\begin{equation}
+  \tilde e_b = e_b + \sigma_b\,(s\odot\varepsilon_b), \qquad \sigma_b\sim\mathcal U(0,\sigma_{\max}), \quad \varepsilon_b\sim\mathcal N(0,I),
+  \label{eq:cond-noise}
+\end{equation}
+where $s\in\R^{64}$ is the per-feature standard deviation of the tokens over the batch, treated as a constant in the backward pass. We measure the noise in units of $s$ for two reasons. The scale of $e$ is learned, so the encoder could make a fixed noise level negligible by scaling its output up. And $s$ is the variation that distinguishes the conformations in a batch, which is the information the noise is meant to blur. With our batch size of 5, $s$ is a coarse estimate of this variation. Since neither $s$ nor $\varepsilon_b$ is differentiated, $\partial\tilde e_b/\partial x = \partial e_b/\partial x$. The noise changes the value of the token but not its gradient, so the forces of every molecule keep the ECT's contribution. Because $s$ does depend on $x$, the training forces are then the gradient of the noisy energy only up to this stop-gradient. A batch of a single molecule has no spread and receives no noise. We use $\sigma_{\max} = 0.5$.
+
+\paragraph{Invariance.}
+For any fixed draw of $m_b$, $\sigma_b$ and $\varepsilon_b$, the token $\tilde e_b$ is rotation invariant, because $\enull$ is constant and $s$ is computed from invariant tokens. Every training step therefore keeps the force equivariance of Section~3.1. At evaluation the clean token is used, so the trained model is deterministic and has the same form as an unregularized one.
+
+\paragraph{Other variants.}
+For FiLM, the regularizer acts on $e$ before Eq.~\eqref{eq:film}. For Hybrid-AdaLN, it acts on $e$ before Eq.~\eqref{eq:adaln-params}, and the same regularized token also reaches the energy head. For LEAP, it acts on the per-atom tokens $\ell e_i$, with $m_b$ and $\sigma_b$ shared by all atoms of molecule $b$ and $\varepsilon$ drawn per atom. A dropped molecule thus loses all of its local ECTs at once. Here $s$ is the standard deviation over all atoms in the batch. It also contains the differences between atoms, not only between conformations, so the same $\sigma_{\max}$ is a stronger perturbation than for $e$. Hybrid-LEAP regularizes $e$ and $\ell e_i$ independently, each with its own null token.
+
+\paragraph{Reliance on the ECT.}
+A model trained with condition dropout can also be evaluated without the ECT, by giving every molecule the null token (every atom for LEAP, and both tokens for Hybrid-LEAP). If the errors barely change, the model has learned to do without the ECT. If they rise sharply, the ECT carries information that the backbone does not reproduce. We report these errors alongside the regular ones.
+
+\section{Experiments}
+
+\subsection{Setup}
+\label{sec:exp-setup}
+
+\paragraph{Data.}
+We use aspirin from revised MD17 (rMD17) \citep{christensen2020rmd17}, the version on which PONITA reports results. We draw 950 training and 50 validation geometries from a single random permutation (seed 42) and test on all remaining frames. This random split replaces the official rMD17 splits, so our numbers are not directly comparable to published ones. We therefore retrain plain PONITA on the same split, with the same training setup, as our baseline.
+
+\paragraph{Training.}
+All models share the PONITA configuration of Section~\ref{sec:ponita} and PONITA's MD17 training setup, and differ only in how the ECT is injected (Section~\ref{sec:fusion}). We train for 5000 epochs with Adam, learning rate $5\cdot10^{-4}$, batch size 5 and gradient-norm clipping at 0.5. The learning rate warms up linearly over 100 epochs and then follows a cosine decay to $10^{-6}$. Every training batch is rotated at random, and we keep an exponential moving average of the weights with decay 0.99, which is used for validation and testing. Energy targets are centered by the training mean, and energy and force targets are both divided by the root mean square $\sigma_F$ of the training force components. Using one scale for both keeps $F = -\nabla_x E$ exact. For a batch of $B$ molecules with $N_B$ atoms in total, we minimize
+\begin{equation}
+  \mathcal L = \frac1B\sum_{b=1}^B \big(\hat E_b - E_b\big)^2 + \frac{w_F}{3N_B}\sum_{i=1}^{N_B}\sum_{\alpha=1}^3 \Big(-\frac{\partial\hat E}{\partial x_{i\alpha}} - F_{i\alpha}\Big)^2, \qquad w_F = 500.
+  \label{eq:loss}
+\end{equation}
+
+We first compare the regularizers of Section~\ref{sec:regularizers} on input concatenation. We train it three times: without regularization, with condition dropout ($p=0.15$), and with token noise ($\sigma_{\max}=0.5$). We evaluate the checkpoint with the lowest validation force error and report mean absolute errors of energies (meV) and forces (meV/\AA) on the test set. All results use seed 0. \todo{Add at least two more seeds and report mean $\pm$ standard deviation.}
+
+\section{Results \& Discussion}
+\todo{Table: PONITA baseline vs.\ each variant (none / dropout / noise), energy and force MAE, plus null-token MAE for dropout runs. Include train/test gap to test the memorization hypothesis of Section~\ref{sec:regularizers}.}
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

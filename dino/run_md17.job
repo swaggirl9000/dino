@@ -1,0 +1,43 @@
+#!/bin/bash
+#SBATCH --partition=gpu_a100
+#SBATCH --gres=gpu:1
+#SBATCH --time=20:00:00
+#SBATCH --mem=16G
+#SBATCH --output=logs/md17_%j.txt
+
+module purge
+module load 2023
+module load CUDA/12.4.0
+
+PROJECT=$HOME/IPT-Equivariant-VAE/dino/InvariantRepresentation
+cd "$PROJECT"
+source "$PROJECT/venv/bin/activate"
+
+MOLECULE=${MOLECULE:-aspirin}
+
+mkdir -p logs
+
+echo "========================================================"
+echo "  rMD17  |  molecule: $MOLECULE  |  job: $SLURM_JOB_ID"
+echo "  Start: $(date)"
+echo "========================================================"
+
+MODEL=${MODEL:-all}
+
+python -u train_egnn_md17.py \
+    --molecule      "$MOLECULE" \
+    --model         "$MODEL" \
+    --cond-type     "${COND_TYPE:-concat}" \
+    --epochs        1000 \
+    --log-interval  20 \
+    --batch-size    5 \
+    --lr            1e-4 \
+    --lr-patience   20 \
+    --lambda-f      1 \
+    --hidden-features 128 \
+    --num-layers    7 \
+    --cutoff        5.0 \
+    --seed          "${SEED:-0}"
+
+echo ""
+echo "End: $(date)"

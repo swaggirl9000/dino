@@ -1,0 +1,120 @@
+#!/bin/bash
+#SBATCH --partition=gpu_a100
+#SBATCH --gres=gpu:1
+#SBATCH --time=48:00:00
+#SBATCH --mem=32G
+#SBATCH --output=logs/ponita_md17_%j.txt
+
+module purge
+module load 2023
+module load CUDA/12.4.0
+
+PROJECT=$HOME/IPT-Equivariant-VAE/dino/InvariantRepresentation
+cd "$PROJECT"
+source "$PROJECT/venv/bin/activate"
+
+MOLECULE=${MOLECULE:-aspirin}
+MODEL=${MODEL:-all}
+SEED=${SEED:-0}
+EPOCHS=${EPOCHS:-5000}
+
+mkdir -p logs checkpoints
+
+# Patch ponita's rotation.py for Python 3.9 (removes match/case syntax).
+python - <<'PYEOF'
+import importlib.util, pathlib, sys
+# Use top-level package only — finding the submodule triggers the broken import chain
+spec = importlib.util.find_spec("ponita")
+if not (spec and spec.origin):
+    print("ponita not found, skipping patch"); sys.exit(0)
+p = pathlib.Path(spec.origin).parent / "geometry" / "rotation.py"
+if not p.exists():
+    print(f"rotation.py not found at {p}, skipping patch"); sys.exit(0)
+src = p.read_text()
+if "match parameterization" not in src:
+    sys.exit(0)
+src = src.replace(
+    '    match parameterization.lower():\n'
+    '        case "quat":\n'
+    '            param_fn = euler_to_quat\n'
+    '        case "matrix":\n'
+    '            param_fn = euler_to_matrix\n'
+    '        case "euler":\n'
+    '            param_fn = lambda x: matrix_to_euler(euler_to_matrix(x))\n'
+    '        case _:\n'
+    '            raise ValueError(f"Parameterization must be in {_PARAMETERIZATION}.")\n',
+    '    _match_val = parameterization.lower()\n'
+    '    if _match_val == "quat":\n'
+    '        param_fn = euler_to_quat\n'
+    '    elif _match_val == "matrix":\n'
+    '        param_fn = euler_to_matrix\n'
+    '    elif _match_val == "euler":\n'
+    '        param_fn = lambda x: matrix_to_euler(euler_to_matrix(x))\n'
+    '    else:\n'
+    '        raise ValueError(f"Parameterization must be in {_PARAMETERIZATION}.")\n',
+).replace(
+    '    match parameterization.lower():\n'
+    '        case "spherical":\n'
+    '            param_fn = lambda x: x\n'
+    '        case "euclidean":\n'
+    '            param_fn = spherical_to_euclid\n'
+    '        case "euler":\n'
+    '            add_alpha = True\n'
+    '            param_fn = lambda x: x\n'
+    '        case "matrix":\n'
+    '            add_alpha = True\n'
+    '            param_fn = euler_to_matrix\n'
+    '        case "quat":\n'
+    '            add_alpha = True\n'
+    '            param_fn = euler_to_quat\n',
+    '    _match_val = parameterization.lower()\n'
+    '    if _match_val == "spherical":\n'
+    '        param_fn = lambda x: x\n'
+    '    elif _match_val == "euclidean":\n'
+    '        param_fn = spherical_to_euclid\n'
+    '    elif _match_val == "euler":\n'
+    '        add_alpha = True\n'
+    '        param_fn = lambda x: x\n'
+    '    elif _match_val == "matrix":\n'
+    '        add_alpha = True\n'
+    '        param_fn = euler_to_matrix\n'
+    '    elif _match_val == "quat":\n'
+    '        add_alpha = True\n'
+    '        param_fn = euler_to_quat\n',
+)
+p.write_text(src)
+# Invalidate stale bytecode cache
+for pyc in p.parent.glob("__pycache__/rotation.cpython-*.pyc"):
+    pyc.unlink(missing_ok=True)
+print(f"Patched {p}")
+PYEOF
+
+echo "========================================================"
+echo "  PONITA MD17  |  molecule: $MOLECULE  |  model: $MODEL"
+echo "  seed: $SEED  |  job: $SLURM_JOB_ID"
+echo "  Start: $(date)"
+echo "========================================================"
+
+python -u train_ponita_md17.py \
+    --molecule      "$MOLECULE" \
+    --model         "$MODEL" \
+    --cond-type     "${COND_TYPE:-film-final}" \
+    --epochs        "$EPOCHS" \
+    --warmup        100 \
+    --log-interval  50 \
+    --batch-size    5 \
+    --lr            5e-4 \
+    --weight-decay  1e-16 \
+    --lambda-f      500 \
+    --hidden-dim    128 \
+    --num-layers    5 \
+    --num-ori       20 \
+    --basis-dim     256 \
+    --ponita-radius 1000.0 \
+    --ect-out-dim   64 \
+    --icosphere-nu  3 \
+    --seed          "$SEED" \
+    --ckpt-dir      "./checkpoints"
+
+echo ""
+echo "End: $(date)"
